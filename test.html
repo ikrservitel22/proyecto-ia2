@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Realtime Whisper</title>
+</head>
+<body>
+
+<h1>Realtime Whisper</h1>
+
+<button id="start">Iniciar</button>
+<button id="stop">Detener</button>
+
+<pre id="output"></pre>
+
+<script>
+
+let ws = null
+let recorder = null
+let stream = null
+let iniciado = false
+
+const output = document.getElementById("output")
+
+document.getElementById("start").onclick = async () => {
+
+    if(iniciado) return
+
+    iniciado = true
+
+    ws = new WebSocket("ws://localhost:8004/ws")
+
+    ws.onopen = async () => {
+
+        console.log("WS conectado")
+
+        stream = await navigator.mediaDevices.getUserMedia({
+            audio: true
+        })
+
+        recorder = new MediaRecorder(stream, {
+            mimeType: "audio/webm"
+        })
+
+        recorder.ondataavailable = async (event) => {
+
+            if(event.data.size > 0){
+
+                const buffer = await event.data.arrayBuffer()
+
+                if(ws.readyState === 1){
+                    ws.send(buffer)
+                }
+            }
+        }
+
+        // chunks más largos
+        recorder.start(100000)
+
+        console.log("Grabando...")
+    }
+
+    ws.onmessage = (event) => {
+
+        const data = JSON.parse(event.data)
+
+        console.log(data)
+
+        if(data.texto){
+
+            output.innerText += "\n" + data.texto
+
+            output.scrollTop = output.scrollHeight
+        }
+    }
+
+    ws.onerror = (e) => {
+        console.log("WS error", e)
+    }
+
+    ws.onclose = () => {
+        console.log("WS cerrado")
+        iniciado = false
+    }
+}
+
+
+document.getElementById("stop").onclick = () => {
+
+    iniciado = false
+
+    if(recorder && recorder.state !== "inactive"){
+        recorder.stop()
+    }
+
+    if(stream){
+        stream.getTracks().forEach(track => track.stop())
+    }
+
+    if(ws){
+        ws.close()
+    }
+
+    console.log("Detenido")
+}
+
+</script>
+
+</body>
+</html>

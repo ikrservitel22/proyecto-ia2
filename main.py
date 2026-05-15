@@ -14,10 +14,6 @@ MODEL = "phi3:mini"
 init_db()
 
 
-# ─────────────────────────────
-# OLLAMA
-# ─────────────────────────────
-
 def call_ollama(prompt):
 
     r = requests.post(
@@ -26,25 +22,16 @@ def call_ollama(prompt):
             "model": MODEL,
             "prompt": prompt,
             "stream": False
-        },
-        timeout=300
+        }
     )
 
     return r.json()["response"]
 
 
-# ─────────────────────────────
-# HEALTH
-# ─────────────────────────────
-
 @app.get("/ping")
 def ping():
     return {"status": "ok"}
 
-
-# ─────────────────────────────
-# AUDIO NORMAL
-# ─────────────────────────────
 
 @app.post("/audio")
 async def audio(file: UploadFile = File(...)):
@@ -54,98 +41,85 @@ async def audio(file: UploadFile = File(...)):
     with open(path, "wb") as f:
         f.write(await file.read())
 
-    # TRANSCRIBIR
     texto = transcribir(path)
 
-    # BUSCAR ERRORES
     errores = buscar_error(texto)
 
-    # PROMPT
     prompt = f"""
 Eres un ingeniero experto en sistemas.
 
 TRANSCRIPCIÓN:
 {texto}
 
-ERRORES DETECTADOS:
+ERRORES:
 {errores}
 
-Responde:
-- diagnóstico probable
+Dame:
+- diagnóstico
 - causa
-- solución paso a paso
-- comandos Linux si aplica
+- solución
 """
 
-    # IA
     respuesta = call_ollama(prompt)
 
-    # BORRAR TEMP
     os.remove(path)
 
     return {
         "texto": texto,
-        "errores_db": errores,
         "respuesta": respuesta
     }
 
 
-# ─────────────────────────────
-# WEBSOCKET REALTIME
-# ─────────────────────────────
+# =========================
+# WEBSOCKET
+# =========================
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
 
     await ws.accept()
 
-    while True:
+    print("cliente conectado")
 
-        try:
+    try:
+
+        while True:
 
             audio_bytes = await ws.receive_bytes()
 
             with tempfile.NamedTemporaryFile(
                 delete=False,
-                suffix=".wav"
-            ) as tmp:
+                suffix=".webm"
+            ) as temp:
 
-                tmp.write(audio_bytes)
+                temp.write(audio_bytes)
+                webm_path = temp.name
 
-                tmp_path = tmp.name
+            try:
 
-            # TRANSCRIBIR
-            texto = transcribir(tmp_path)
+                texto = transcribir(webm_path)
 
-            # DB
-            errores = buscar_error(texto)
+                if texto.strip():
 
-            # PROMPT IA
-            prompt = f"""
-Eres un ingeniero experto en soporte TI.
+                    print("TEXTO:", texto)
 
-USUARIO:
-{texto}
+                    await ws.send_json({
+                        "texto": texto
+                    })
 
-ERRORES ENCONTRADOS:
-{errores}
+            except Exception as e:
 
-Responde corto y útil.
-"""
+                print("ERROR TRANSCRIPCION:", str(e))
 
-            respuesta = call_ollama(prompt)
+                await ws.send_json({
+                    "error": str(e)
+                })
 
-            # RESPUESTA
-            await ws.send_json({
-                "texto": texto,
-                "errores": errores,
-                "respuesta": respuesta
-            })
+            finally:
 
-            os.remove(tmp_path)
+                if os.path.exists(webm_path):
+                    os.remove(webm_path)
 
-        except Exception as e:
+    except Exception as e:
 
-            await ws.send_json({
-                "error": str(e)
-            })
+        print("WS DESCONECTADO:", str(e))
