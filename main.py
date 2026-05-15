@@ -1,27 +1,50 @@
-from fastapi import FastAPI, UploadFile, File
-import os
+from fastapi import FastAPI, UploadFile, File, WebSocket
 import requests
+import tempfile
+import os
 
 from db import init_db, buscar_error
 from audio import transcribir
 
 app = FastAPI()
 
-OLLAMA_URL = "http://proyecto-ia:11434/api/generate"
-MODEL = "qwen2.5:7b-instruct"
+OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+MODEL = "phi3:mini"
 
 init_db()
 
 
+# ─────────────────────────────
+# OLLAMA
+# ─────────────────────────────
+
 def call_ollama(prompt):
-    r = requests.post(OLLAMA_URL, json={
-        "model": MODEL,
-        "prompt": prompt,
-        "stream": False
-    })
+
+    r = requests.post(
+        OLLAMA_URL,
+        json={
+            "model": MODEL,
+            "prompt": prompt,
+            "stream": False
+        },
+        timeout=300
+    )
 
     return r.json()["response"]
 
+
+# ─────────────────────────────
+# HEALTH
+# ─────────────────────────────
+
+@app.get("/ping")
+def ping():
+    return {"status": "ok"}
+
+
+# ─────────────────────────────
+# AUDIO NORMAL
+# ─────────────────────────────
 
 @app.post("/audio")
 async def audio(file: UploadFile = File(...)):
@@ -31,34 +54,98 @@ async def audio(file: UploadFile = File(...)):
     with open(path, "wb") as f:
         f.write(await file.read())
 
-    # 1. transcribir
+    # TRANSCRIBIR
     texto = transcribir(path)
 
-    # 2. detectar posible error
+    # BUSCAR ERRORES
     errores = buscar_error(texto)
 
-    # 3. construir prompt inteligente
+    # PROMPT
     prompt = f"""
 Eres un ingeniero experto en sistemas.
 
-TRANSCRIPCIÓN DEL USUARIO:
+TRANSCRIPCIÓN:
 {texto}
 
-ERRORES EN BASE DE DATOS:
+ERRORES DETECTADOS:
 {errores}
 
-Dame:
+Responde:
 - diagnóstico probable
 - causa
 - solución paso a paso
-- comandos si aplica
+- comandos Linux si aplica
 """
 
-    # 4. IA responde
+    # IA
     respuesta = call_ollama(prompt)
+
+    # BORRAR TEMP
+    os.remove(path)
 
     return {
         "texto": texto,
         "errores_db": errores,
         "respuesta": respuesta
     }
+
+
+# ─────────────────────────────
+# WEBSOCKET REALTIME
+# ─────────────────────────────
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+
+    await ws.accept()
+
+    while True:
+
+        try:
+
+            audio_bytes = await ws.receive_bytes()
+
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=".wav"
+            ) as tmp:
+
+                tmp.write(audio_bytes)
+
+                tmp_path = tmp.name
+
+            # TRANSCRIBIR
+            texto = transcribir(tmp_path)
+
+            # DB
+            errores = buscar_error(texto)
+
+            # PROMPT IA
+            prompt = f"""
+Eres un ingeniero experto en soporte TI.
+
+USUARIO:
+{texto}
+
+ERRORES ENCONTRADOS:
+{errores}
+
+Responde corto y útil.
+"""
+
+            respuesta = call_ollama(prompt)
+
+            # RESPUESTA
+            await ws.send_json({
+                "texto": texto,
+                "errores": errores,
+                "respuesta": respuesta
+            })
+
+            os.remove(tmp_path)
+
+        except Exception as e:
+
+            await ws.send_json({
+                "error": str(e)
+            })

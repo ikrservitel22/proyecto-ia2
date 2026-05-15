@@ -4,3 +4,7 @@ python-multipart
 requests
 faster-whisper
 sqlalchemy
+faster-whisper
+ctranslate2
+python-multipart
+websockets

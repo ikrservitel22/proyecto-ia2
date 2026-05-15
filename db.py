@@ -1,12 +1,17 @@
 import sqlite3
 
+
 def init_db():
+
     conn = sqlite3.connect("errors.db")
+
     c = conn.cursor()
 
     c.execute("""
     CREATE TABLE IF NOT EXISTS errores (
-        id INTEGER PRIMARY KEY,
+
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+
         codigo TEXT,
         sistema TEXT,
         causa TEXT,
@@ -19,13 +24,28 @@ def init_db():
 
 
 def buscar_error(texto):
+
     conn = sqlite3.connect("errors.db")
+
     c = conn.cursor()
 
-    c.execute("""
-        SELECT codigo, sistema, causa, solucion
-        FROM errores
-        WHERE codigo LIKE ? OR sistema LIKE ? OR causa LIKE ?
-    """, (f"%{texto}%", f"%{texto}%", f"%{texto}%"))
+    query = f"%{texto.lower()}%"
 
-    return c.fetchall()
+    c.execute("""
+        SELECT
+            codigo,
+            sistema,
+            causa,
+            solucion
+        FROM errores
+        WHERE
+            LOWER(codigo) LIKE ?
+            OR LOWER(sistema) LIKE ?
+            OR LOWER(causa) LIKE ?
+    """, (query, query, query))
+
+    resultados = c.fetchall()
+
+    conn.close()
+
+    return resultados
