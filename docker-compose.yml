@@ -1,0 +1,15 @@
+services:
+  proyecto-ia2:
+    build: .
+    container_name: proyecto-ia2
+    ports:
+      - "8004:8002"
+      - "2224:22"
+    volumes:
+      - .:/app
+    networks:
+      - red_ia
+
+networks:
+  red_ia:
+    external: true
