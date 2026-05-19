@@ -1,51 +1,32 @@
-import sqlite3
+from faster_whisper import WhisperModel
 
+model = WhisperModel(
+    "small",
+    device="cpu",
+    compute_type="int8"
+)
 
-def init_db():
+def transcribir_array(audio_array):
 
-    conn = sqlite3.connect("errors.db")
+    segments, info = model.transcribe(
 
-    c = conn.cursor()
+        audio_array,
 
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS errores (
+        language="es",
 
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        beam_size=1,
 
-        codigo TEXT,
-        sistema TEXT,
-        causa TEXT,
-        solucion TEXT
+        vad_filter=False,
+
+        condition_on_previous_text=True,
+
+        temperature=0.0,
+
+        initial_prompt="Conversación natural en español."
     )
-    """)
 
-    conn.commit()
-    conn.close()
+    texto = " ".join([
+        s.text for s in segments
+    ])
 
-
-def buscar_error(texto):
-
-    conn = sqlite3.connect("errors.db")
-
-    c = conn.cursor()
-
-    query = f"%{texto.lower()}%"
-
-    c.execute("""
-        SELECT
-            codigo,
-            sistema,
-            causa,
-            solucion
-        FROM errores
-        WHERE
-            LOWER(codigo) LIKE ?
-            OR LOWER(sistema) LIKE ?
-            OR LOWER(causa) LIKE ?
-    """, (query, query, query))
-
-    resultados = c.fetchall()
-
-    conn.close()
-
-    return resultados
+    return texto.strip()

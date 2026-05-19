@@ -1,106 +1,225 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Realtime Whisper</title>
+    <title>Realtime Speech</title>
+
+    <style>
+        body{
+            font-family: Arial;
+            padding:20px;
+        }
+
+        button{
+            padding:10px;
+            margin:5px;
+        }
+
+        #output{
+            border:1px solid #ccc;
+            padding:10px;
+            height:300px;
+            overflow:auto;
+            white-space:pre-wrap;
+        }
+
+        #live{
+            border:1px dashed #aaa;
+            padding:10px;
+            height:40px;
+            margin-bottom:10px;
+            color: gray;
+            font-style: italic;
+        }
+    </style>
 </head>
+
 <body>
 
-<h1>Realtime Whisper</h1>
+<h1>Realtime Speech</h1>
 
-<button id="start">Iniciar</button>
-<button id="stop">Detener</button>
+<button id="start">INICIAR</button>
+<button id="stop">DETENER</button>
 
+<hr>
+
+<div id="status"></div>
+
+<!-- 🟢 texto en vivo -->
+<div id="live">...</div>
+
+<!-- ⚡ texto final -->
 <pre id="output"></pre>
 
 <script>
 
 let ws = null
-let recorder = null
 let stream = null
-let iniciado = false
+let audioContext = null
+let processor = null
+let source = null
+
+let running = false
 
 const output = document.getElementById("output")
+const status = document.getElementById("status")
+const live = document.getElementById("live")
+
+function stopEverything(){
+
+    running = false
+
+    if(processor){
+        processor.disconnect()
+        processor = null
+    }
+
+    if(source){
+        source.disconnect()
+        source = null
+    }
+
+    if(audioContext){
+        audioContext.close()
+        audioContext = null
+    }
+
+    if(stream){
+        stream.getTracks().forEach(t => t.stop())
+        stream = null
+    }
+
+    if(ws){
+        ws.close()
+        ws = null
+    }
+
+    status.innerText = "Detenido"
+}
+
+function resampleBuffer(buffer, inputSampleRate, outputSampleRate){
+
+    if(inputSampleRate === outputSampleRate){
+        return buffer
+    }
+
+    const ratio = inputSampleRate / outputSampleRate
+    const newLength = Math.round(buffer.length / ratio)
+    const result = new Float32Array(newLength)
+
+    for(let i = 0; i < newLength; i++){
+        const index = i * ratio
+        const before = Math.floor(index)
+        const after = Math.min(before + 1, buffer.length - 1)
+        const atPoint = index - before
+        result[i] = buffer[before] + (buffer[after] - buffer[before]) * atPoint
+    }
+
+    return result
+}
+
+document.getElementById("stop").onclick = stopEverything
 
 document.getElementById("start").onclick = async () => {
 
-    if(iniciado) return
+    stopEverything()
 
-    iniciado = true
+    output.innerText = ""
+    live.innerText = ""
+    running = true
 
-    ws = new WebSocket("ws://localhost:8004/ws")
+    // =========================
+    // WS
+    // =========================
+    ws = new WebSocket("ws://localhost:8004/ws/realtime")
+    ws.binaryType = "arraybuffer"
 
-    ws.onopen = async () => {
-
-        console.log("WS conectado")
-
-        stream = await navigator.mediaDevices.getUserMedia({
-            audio: true
-        })
-
-        recorder = new MediaRecorder(stream, {
-            mimeType: "audio/webm"
-        })
-
-        recorder.ondataavailable = async (event) => {
-
-            if(event.data.size > 0){
-
-                const buffer = await event.data.arrayBuffer()
-
-                if(ws.readyState === 1){
-                    ws.send(buffer)
-                }
-            }
-        }
-
-        // chunks más largos
-        recorder.start(100000)
-
-        console.log("Grabando...")
+    ws.onopen = () => {
+        status.innerText = "Conectado"
     }
 
     ws.onmessage = (event) => {
 
         const data = JSON.parse(event.data)
 
-        console.log(data)
+        // 🟢 LIVE (parcial)
+        if(data.type === "partial"){
+            live.innerText = "🎤 " + data.texto
+        }
 
-        if(data.texto){
-
-            output.innerText += "\n" + data.texto
-
+        // ⚡ FINAL (confirmado)
+        if(data.type === "final"){
+            output.innerText += data.texto + " "
             output.scrollTop = output.scrollHeight
+        }
+
+        if(data.error){
+            output.innerText += "\nERROR: " + data.error
         }
     }
 
-    ws.onerror = (e) => {
-        console.log("WS error", e)
-    }
-
     ws.onclose = () => {
-        console.log("WS cerrado")
-        iniciado = false
-    }
-}
-
-
-document.getElementById("stop").onclick = () => {
-
-    iniciado = false
-
-    if(recorder && recorder.state !== "inactive"){
-        recorder.stop()
+        status.innerText = "Desconectado"
     }
 
-    if(stream){
-        stream.getTracks().forEach(track => track.stop())
+    await new Promise(res => ws.addEventListener("open", res))
+
+    // =========================
+    // MIC
+    // =========================
+    stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+        }
+    })
+
+    audioContext = new AudioContext({ sampleRate: 16000 })
+    await audioContext.resume()
+
+    const inputSampleRate = audioContext.sampleRate
+
+    source = audioContext.createMediaStreamSource(stream)
+
+    processor = audioContext.createScriptProcessor(1024, 1, 1)
+
+    processor.onaudioprocess = (e) => {
+
+        if(!running || !ws || ws.readyState !== 1) return
+
+        const input = e.inputBuffer.getChannelData(0)
+
+        const resampled = resampleBuffer(
+            input,
+            inputSampleRate,
+            16000
+        )
+
+        const pcm = new Int16Array(resampled.length)
+
+        let sum = 0
+
+        for(let i = 0; i < resampled.length; i++){
+
+            let s = Math.max(-1, Math.min(1, resampled[i]))
+
+            pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
+
+            sum += Math.abs(pcm[i])
+        }
+
+        const volume = sum / pcm.length
+
+        if(volume < 30) return
+
+        ws.send(pcm.buffer)
     }
 
-    if(ws){
-        ws.close()
-    }
+    source.connect(processor)
+    processor.connect(audioContext.destination)
 
-    console.log("Detenido")
+    status.innerText = "Escuchando..."
 }
 
 </script>

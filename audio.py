@@ -1,48 +1,25 @@
 from faster_whisper import WhisperModel
-import ffmpeg
-import tempfile
-import os
+import numpy as np
 
 model = WhisperModel(
-    "base",
+    "turbo",
     device="cpu",
     compute_type="int8"
 )
 
+def transcribir_array(audio_array, prompt=None):
 
-def convertir_audio(input_path):
-
-    output_path = tempfile.mktemp(suffix=".wav")
-
-    (
-        ffmpeg
-        .input(input_path)
-        .output(
-            output_path,
-            format="wav",
-            acodec="pcm_s16le",
-            ac=1,
-            ar="16000"
-        )
-        .overwrite_output()
-        .run(quiet=True)
-    )
-
-    return output_path
-
-
-def transcribir(audio_path):
-
-    wav_path = convertir_audio(audio_path)
-
-    segments, _ = model.transcribe(
-        wav_path,
+    segments, info = model.transcribe(
+        audio_array,
+        language="es",
         beam_size=1,
-        vad_filter=True
+        best_of=1,
+        vad_filter=False,
+        condition_on_previous_text=True,
+        temperature=0.0,
+        initial_prompt=prompt
     )
 
-    texto = " ".join([s.text for s in segments])
-
-    os.remove(wav_path)
+    texto = " ".join(s.text.strip() for s in segments)
 
     return texto.strip()
