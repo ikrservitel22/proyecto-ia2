@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Asistente IA</title>
+
+    <style>
+
+        body{
+            font-family: Arial;
+            padding:20px;
+            background:#f5f5f5;
+        }
+
+        button{
+            padding:12px 20px;
+            margin-right:10px;
+            cursor:pointer;
+        }
+
+        .box{
+            background:white;
+            border-radius:10px;
+            padding:15px;
+            margin-top:20px;
+            box-shadow:0 2px 5px rgba(0,0,0,0.1);
+        }
+
+        #status{
+            margin-top:10px;
+            font-weight:bold;
+        }
+
+        .label{
+            font-weight:bold;
+            margin-bottom:10px;
+        }
+
+        #usuario{
+            color:#1e88e5;
+        }
+
+        #ia{
+            color:#43a047;
+        }
+
+    </style>
+</head>
+
+<body>
+
+    <h1>Asistente IA Voz</h1>
+
+    <button id="start">🎤 HABLAR</button>
+    <button id="stop">⛔ DETENER</button>
+
+    <div id="status"></div>
+
+    <div class="box">
+        <div class="label">🧑 Lo que escuchó la IA:</div>
+        <div id="usuario">...</div>
+    </div>
+
+    <div class="box">
+        <div class="label">🤖 Respuesta IA:</div>
+        <div id="ia">...</div>
+    </div>
+
+<script>
+
+let ws = null
+let stream = null
+let audioContext = null
+let processor = null
+let source = null
+
+let running = false
+
+const statusDiv = document.getElementById("status")
+const usuarioDiv = document.getElementById("usuario")
+const iaDiv = document.getElementById("ia")
+
+// =========================
+// DETENER
+// =========================
+
+function stopEverything(){
+
+    running = false
+
+    if(processor){
+        processor.disconnect()
+        processor = null
+    }
+
+    if(source){
+        source.disconnect()
+        source = null
+    }
+
+    if(audioContext){
+        audioContext.close()
+        audioContext = null
+    }
+
+    if(stream){
+        stream.getTracks().forEach(
+            t => t.stop()
+        )
+        stream = null
+    }
+
+    if(ws){
+        ws.close()
+        ws = null
+    }
+
+    statusDiv.innerText = "⛔ Detenido"
+}
+
+document.getElementById("stop").onclick =
+    stopEverything
+
+// =========================
+// RESAMPLE
+// =========================
+
+function resampleBuffer(
+    buffer,
+    inputSampleRate,
+    outputSampleRate
+){
+
+    if(inputSampleRate === outputSampleRate){
+        return buffer
+    }
+
+    const ratio =
+        inputSampleRate / outputSampleRate
+
+    const newLength =
+        Math.round(buffer.length / ratio)
+
+    const result =
+        new Float32Array(newLength)
+
+    for(let i = 0; i < newLength; i++){
+
+        const index = i * ratio
+
+        const before = Math.floor(index)
+
+        const after = Math.min(
+            before + 1,
+            buffer.length - 1
+        )
+
+        const atPoint = index - before
+
+        result[i] =
+            buffer[before] +
+            (
+                buffer[after] - buffer[before]
+            ) * atPoint
+    }
+
+    return result
+}
+
+// =========================
+// INICIAR
+// =========================
+
+document.getElementById("start").onclick =
+async () => {
+
+    stopEverything()
+
+    usuarioDiv.innerText = "..."
+    iaDiv.innerText = "..."
+
+    running = true
+
+    // =====================
+    // WEBSOCKET
+    // =====================
+
+    ws = new WebSocket(
+        "ws://localhost:8004/ws/realtime"
+    )
+
+    ws.binaryType = "arraybuffer"
+
+    ws.onopen = () => {
+
+        statusDiv.innerText =
+            "✅ Conectado"
+    }
+
+    ws.onmessage = (event) => {
+
+        const data = JSON.parse(event.data)
+
+        console.log("📩 backend:", data)
+
+        if(data.type === "final"){
+
+            usuarioDiv.innerText = data.texto
+        }
+
+        if(data.type === "ia"){
+
+            iaDiv.innerText = data.texto
+
+            const speech = new SpeechSynthesisUtterance(
+                data.texto
+            )
+
+            speech.lang = "es-ES"
+
+            speech.rate = 1
+
+            window.speechSynthesis.speak(speech)
+        }
+
+        if(data.type === "error"){
+
+            iaDiv.innerText =
+                "ERROR IA: " + data.texto
+        }
+    }
+
+    ws.onclose = () => {
+
+        statusDiv.innerText =
+            "🔌 Desconectado"
+    }
+
+    // =====================
+    // ESPERAR WS
+    // =====================
+
+    await new Promise(
+        res => ws.addEventListener(
+            "open",
+            res
+        )
+    )
+
+    // =====================
+    // MICRÓFONO
+    // =====================
+
+    stream =
+        await navigator.mediaDevices
+        .getUserMedia({
+
+            audio: {
+
+                channelCount: 1,
+
+                echoCancellation: true,
+
+                noiseSuppression: true,
+
+                autoGainControl: true
+            }
+        })
+
+    audioContext =
+        new AudioContext({
+            sampleRate: 16000
+        })
+
+    await audioContext.resume()
+
+    const inputSampleRate =
+        audioContext.sampleRate
+
+    source =
+        audioContext
+        .createMediaStreamSource(stream)
+
+    processor =
+        audioContext
+        .createScriptProcessor(
+            1024,
+            1,
+            1
+        )
+
+    processor.onaudioprocess = (e) => {
+
+        if(
+            !running ||
+            !ws ||
+            ws.readyState !== 1
+        ){
+            return
+        }
+
+        const input =
+            e.inputBuffer.getChannelData(0)
+
+        const resampled =
+            resampleBuffer(
+                input,
+                inputSampleRate,
+                16000
+            )
+
+        const pcm =
+            new Int16Array(
+                resampled.length
+            )
+
+        let sum = 0
+
+        for(
+            let i = 0;
+            i < resampled.length;
+            i++
+        ){
+
+            let s = Math.max(
+                -1,
+                Math.min(
+                    1,
+                    resampled[i]
+                )
+            )
+
+            pcm[i] =
+                s < 0
+                ? s * 0x8000
+                : s * 0x7FFF
+
+            sum += Math.abs(pcm[i])
+        }
+
+        const volume =
+            sum / pcm.length
+
+        // filtro silencio
+        if(volume < 20){
+            return
+        }
+
+        ws.send(pcm.buffer)
+    }
+
+    source.connect(processor)
+
+    processor.connect(
+        audioContext.destination
+    )
+
+    statusDiv.innerText =
+        "🎤 Escuchando..."
+}
+
+</script>
+
+</body>
+</html>

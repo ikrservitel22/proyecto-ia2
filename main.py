@@ -1,146 +1,117 @@
 from fastapi import FastAPI, WebSocket
-import asyncio
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from starlette.requests import Request
+
 import numpy as np
 from collections import deque
 
-from audio import transcribir_array
+from bot import transcribir_audio, ask_llm
 
 app = FastAPI()
 
-print("REALTIME SERVER OK")
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# ====================================================
-# CONFIG
-# ====================================================
+templates = Jinja2Templates(directory="templates")
+
+# =========================
+# CONFIG AUDIO STREAM
+# =========================
 
 SAMPLE_RATE = 16000
+WINDOW_SECONDS = 5
+OVERLAP_SECONDS = 1
 
-MAX_SECONDS = 16
-TRANSCRIBE_SECONDS = 1.5
-STEP_SECONDS = 0.6
+WINDOW_SIZE = SAMPLE_RATE * WINDOW_SECONDS
+OVERLAP_SIZE = SAMPLE_RATE * OVERLAP_SECONDS
 
-MAX_SAMPLES = SAMPLE_RATE * MAX_SECONDS
-TRANSCRIBE_SAMPLES = int(SAMPLE_RATE * TRANSCRIBE_SECONDS)
+# =========================
+# HOME
+# =========================
 
-MIN_VOLUME = 20
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
 
-# ====================================================
-# UTIL
-# ====================================================
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html"
+    )
 
-def merge_text(old, new):
-    old_words = old.split()
-    new_words = new.split()
-
-    best_overlap = 0
-    max_check = min(len(old_words), len(new_words))
-
-    for i in range(1, max_check + 1):
-        if old_words[-i:] == new_words[:i]:
-            best_overlap = i
-
-    return " ".join(old_words + new_words[best_overlap:])
-
-
-# ====================================================
-# WEBSOCKET
-# ====================================================
+# =========================
+# REALTIME WS
+# =========================
 
 @app.websocket("/ws/realtime")
-async def ws_realtime(ws: WebSocket):
+async def websocket_endpoint(ws: WebSocket):
 
     await ws.accept()
-    print("cliente conectado")
+    print("Cliente conectado")
 
-    pending_audio = deque(maxlen=MAX_SAMPLES)
+    audio_buffer = np.array([], dtype=np.int16)
 
-    full_text = ""
+    try:
 
-    # 🔥 PUNTERO CLAVE (EVITA REPETICIÓN)
-    last_processed_index = 0
-
-    async def receive_audio():
         while True:
+
             data = await ws.receive_bytes()
 
-            audio_np = np.frombuffer(data, dtype=np.int16)
-            pending_audio.extend(audio_np)
+            print("📦 chunk recibido:", len(data))
 
-    async def transcribe_loop():
-        nonlocal full_text, last_processed_index
+            chunk = np.frombuffer(data, dtype=np.int16)
 
-        while True:
-            await asyncio.sleep(STEP_SECONDS)
+            # buffer continuo (NO lista)
+            audio_buffer = np.concatenate([audio_buffer, chunk])
 
-            audio_list = list(pending_audio)
+            print("🎤 samples acumulados:", len(audio_buffer))
 
-            # 🔥 SOLO AUDIO NUEVO (NO REPROCESAR PASADO)
-            new_audio = audio_list[last_processed_index:]
+            # suficiente audio para procesar
+            if len(audio_buffer) >= WINDOW_SIZE:
 
-            if len(new_audio) < TRANSCRIBE_SAMPLES * 1.2:
-                continue
+                window_audio = audio_buffer[:WINDOW_SIZE]
 
-            # ventana actual SOLO del audio nuevo
-            window = new_audio[-TRANSCRIBE_SAMPLES:]
+                print("🧠 transcribiendo...")
 
-            current_audio = np.array(window, dtype=np.int16)
+                texto = transcribir_audio(window_audio)
 
-            volume = np.abs(current_audio).mean()
+                print("📝 texto:", texto)
 
-            MIN_VOLUME = 40
-
-            if volume < MIN_VOLUME:
-                silence_counter += 1
-                if silence_counter < SILENCE_FRAMES:
-                    continue
-            else:
-                silence_counter = 0
-
-            audio_float = current_audio.astype(np.float32) / 32768.0
-
-            try:
-                # ⚡ IMPORTANTE: sin contexto viejo
-                text = await asyncio.to_thread(
-                    transcribir_array,
-                    audio_float,
-                    None
-                )
-
-                text = text.strip()
-                if not text:
+                # ❌ FIX: si no hay texto, reset parcial
+                if not texto:
+                    audio_buffer = audio_buffer[WINDOW_SIZE - OVERLAP_SIZE:]
                     continue
 
-                # ==============================
-                # 🟢 LIVE TEXT (opcional simple)
-                # ==============================
                 await ws.send_json({
-                    "type": "partial",
-                    "texto": text
+                    "type": "final",
+                    "texto": texto
                 })
 
-                # ==============================
-                # ⚡ FINAL TEXT (estable)
-                # ==============================
-                merged = merge_text(full_text, text)
+                try:
 
-                if merged != full_text:
-                    new_part = merged[len(full_text):].strip()
-                    full_text = merged
+                    print("🤖 preguntando IA...")
 
-                    if new_part:
-                        await ws.send_json({
-                            "type": "final",
-                            "texto": new_part
-                        })
+                    respuesta = ask_llm(texto)
 
-                # 🔥 AVANZAR PUNTERO (CLAVE DEL SISTEMA)
-                last_processed_index += len(window)
+                    print("✅ respuesta:", respuesta)
 
-            except Exception as e:
-                print("ERROR:", e)
-                await ws.send_json({"error": str(e)})
+                    await ws.send_json({
+                        "type": "ia",
+                        "texto": respuesta
+                    })
 
-    await asyncio.gather(
-        receive_audio(),
-        transcribe_loop()
-    )
+                except Exception as e:
+
+                    print("❌ ERROR IA:", e)
+
+                    await ws.send_json({
+                        "type": "error",
+                        "texto": str(e)
+                    })
+
+                # 🔥 SLIDING WINDOW (NO RESET BRUSCO)
+                audio_buffer = audio_buffer[WINDOW_SIZE - OVERLAP_SIZE:]
+
+    except Exception as e:
+
+        print("WS ERROR:", e)
+        await ws.close()
