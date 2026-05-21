@@ -15,7 +15,7 @@ done
 
 echo "Ollama listo"
 
-ollama pull phi3:mini
+ollama pull qwen2.5:latest
 
 echo "Modelo listo"
 

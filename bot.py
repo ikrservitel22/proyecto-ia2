@@ -33,26 +33,7 @@ conn = psycopg2.connect(
 print("✅ PostgreSQL conectado")
 
 # ====================================================
-# HISTORIAL CHAT
-# ====================================================
-
-chat_history = [
-    {
-        "role": "system",
-        "content": """
-Eres un asistente conversacional útil, breve y natural.
-
-Usa SIEMPRE el contexto entregado desde la base de datos
-para responder preguntas del usuario.
-
-Si el contexto no contiene información suficiente,
-responde normalmente.
-"""
-    }
-]
-
-# ====================================================
-# TRANSCRIBIR
+# TRANSCRIBIR AUDIO
 # ====================================================
 
 def transcribir_audio(audio_np):
@@ -66,137 +47,218 @@ def transcribir_audio(audio_np):
         language="es"
     )
 
-    texto = " ".join([s.text for s in segments]).strip()
+    texto = " ".join(
+        [s.text for s in segments]
+    ).strip()
 
     return texto
 
 # ====================================================
-# BUSCAR CONTEXTO DB
+# BUSCAR SOLUCION EN DB
 # ====================================================
 
 def buscar_contexto(user_text):
 
     try:
 
-        print("🔍 buscando contexto para:", user_text)
+        print("🔍 buscando:", user_text)
+
+        mensaje = user_text.lower().strip()
 
         cur = conn.cursor()
+
+        # ============================================
+        # TRAER TODAS LAS SOLUCIONES
+        # ============================================
 
         query = """
         SELECT error_text, solution, tags
         FROM error_solutions
-        LIMIT 5
         """
 
         cur.execute(query)
 
         rows = cur.fetchall()
 
-        print("📚 filas encontradas:", rows)
-
         cur.close()
 
         if not rows:
-            print("❌ NO HAY FILAS")
-            return "Sin contexto relevante."
 
-        contexto = []
+            print("❌ DB VACIA")
+
+            return None
+
+        # ============================================
+        # BUSQUEDA SIMPLE POR PALABRAS
+        # ============================================
+
+        mejor_score = 0
+        mejor_solucion = None
+
+        palabras_usuario = set(
+            mensaje.split()
+        )
 
         for error_text, solution, tags in rows:
 
-            contexto.append(
-                f"""
-Error: {error_text}
+            texto_db = f"""
+            {error_text}
+            {tags}
+            """.lower()
 
-Solución: {solution}
-
-Tags: {tags}
-"""
+            palabras_db = set(
+                texto_db.split()
             )
 
-        contexto_final = "\n".join(contexto)
+            coincidencias = (
+                palabras_usuario &
+                palabras_db
+            )
 
-        print("✅ CONTEXTO FINAL:")
-        print(contexto_final)
+            score = len(coincidencias)
 
-        return contexto_final
+            print("---------------")
+            print("DB:", error_text)
+            print("MATCH:", coincidencias)
+            print("SCORE:", score)
+
+            if score > mejor_score:
+
+                mejor_score = score
+                mejor_solucion = solution
+
+        # ============================================
+        # UMBRAL MINIMO
+        # ============================================
+
+        if mejor_score >= 1:
+
+            print("✅ SOLUCION ENCONTRADA")
+            print(mejor_solucion)
+
+            return mejor_solucion
+
+        print("❌ SIN MATCH")
+
+        return None
 
     except Exception as e:
 
         print("❌ ERROR DB:", e)
 
-        return "Error obteniendo contexto."
+        return None
+
 # ====================================================
-# IA
+# IA / RESPUESTA
 # ====================================================
 
 def ask_llm(user_text: str):
 
-    # buscar contexto en postgres
-    contexto_db = buscar_contexto(user_text)
+    # ============================================
+    # BUSCAR EN DB
+    # ============================================
 
-    print("========== CONTEXTO DB ==========")
-    print(contexto_db)
-    print("=================================")
+    solucion_db = buscar_contexto(user_text)
 
-    # prompt enriquecido
-    prompt = f"""
-CONTEXTO BASE DE DATOS:
+    # ============================================
+    # SI ENCONTRO SOLUCION
+    # ============================================
 
-{contexto_db}
+    if solucion_db:
 
+        print("✅ SOLUCION DB:", solucion_db)
 
-PREGUNTA USUARIO:
+        prompt = f"""
+El usuario dijo:
 
-{user_text}
+"{user_text}"
+
+La siguiente información viene de la base de datos:
+
+"{solucion_db}"
+
+Responde al usuario:
+- en español
+- de forma natural
+- breve
+- amable
+- usando la información dada como base
+- puedes reformular la respuesta
+- NO inventes pasos nuevos
 """
 
-    chat_history.append({
-        "role": "user",
-        "content": prompt
-    })
+    else:
 
-    print("📨 enviando a ollama...")
+        print("🤖 SIN DB -> IA NORMAL")
+
+        prompt = f"""
+Usuario:
+
+{user_text}
+
+Responde en español de forma breve y natural.
+"""
+
+    # ============================================
+    # REQUEST OLLAMA
+    # ============================================
 
     response = requests.post(
+
         os.getenv(
             "OLLAMA_URL",
             "http://host.docker.internal:11435/api/chat"
         ),
+
         json={
-            "model": os.getenv(
-                "IA_MODEL",
-                "qwen2.5:latest"
-            ),
-            "messages": chat_history,
-            "stream": False
+
+            "model": "qwen2.5:latest",
+
+            "messages": [
+
+                {
+                    "role": "system",
+                    "content": """
+Eres un asistente técnico.
+
+REGLAS:
+- Siempre responde en español.
+- Nunca hables en otro idioma.
+- Sé breve.
+- No inventes soluciones.
+"""
+                },
+
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+
+            ],
+
+            "stream": False,
+
+            "options": {
+                "temperature": 0.3
+            }
         },
+
         timeout=300
     )
 
     data = response.json()
 
-    print("📦 respuesta ollama:", data)
+    print("📦 RESPUESTA IA:")
+    print(data)
 
     if "message" in data:
 
-        respuesta = data["message"]["content"]
+        return data["message"]["content"]
 
     elif "response" in data:
 
-        respuesta = data["response"]
-
-    elif "error" in data:
-
-        raise Exception(data["error"])
+        return data["response"]
 
     else:
 
-        raise Exception(f"Respuesta inesperada: {data}")
-
-    chat_history.append({
-        "role": "assistant",
-        "content": respuesta
-    })
-
-    return respuesta
+        return "Ocurrió un error generando la respuesta."
