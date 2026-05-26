@@ -5,26 +5,20 @@ from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 import numpy as np
-from collections import deque
 
-from bot import transcribir_audio, ask_llm
+from bot import pipeline_audio
 
 app = FastAPI()
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount(
+    "/static",
+    StaticFiles(directory="static"),
+    name="static"
+)
 
-templates = Jinja2Templates(directory="templates")
-
-# =========================
-# CONFIG AUDIO STREAM
-# =========================
-
-SAMPLE_RATE = 16000
-WINDOW_SECONDS = 5
-OVERLAP_SECONDS = 1
-
-WINDOW_SIZE = SAMPLE_RATE * WINDOW_SECONDS
-OVERLAP_SIZE = SAMPLE_RATE * OVERLAP_SECONDS
+templates = Jinja2Templates(
+    directory="templates"
+)
 
 # =========================
 # HOME
@@ -46,72 +40,113 @@ async def home(request: Request):
 async def websocket_endpoint(ws: WebSocket):
 
     await ws.accept()
-    print("Cliente conectado")
 
-    audio_buffer = np.array([], dtype=np.int16)
+    print("✅ Cliente conectado")
+
+    # =====================================
+    # MEMORIA CONVERSACIÓN
+    # =====================================
+
+    conversation_history = []
 
     try:
 
         while True:
 
+            # =====================================
+            # RECIBIR AUDIO
+            # =====================================
+
             data = await ws.receive_bytes()
 
-            print("📦 chunk recibido:", len(data))
+            frame_np = np.frombuffer(
+                data,
+                dtype=np.int16
+            )
 
-            chunk = np.frombuffer(data, dtype=np.int16)
+            print(
+                "📦 frame recibido:",
+                len(frame_np)
+            )
 
-            # buffer continuo (NO lista)
-            audio_buffer = np.concatenate([audio_buffer, chunk])
+            # =====================================
+            # PIPELINE
+            # =====================================
 
-            print("🎤 samples acumulados:", len(audio_buffer))
+            resultado = pipeline_audio(
+                frame_np,
+                conversation_history
+            )
 
-            # suficiente audio para procesar
-            if len(audio_buffer) >= WINDOW_SIZE:
+            # =====================================
+            # SI HAY RESULTADO
+            # =====================================
 
-                window_audio = audio_buffer[:WINDOW_SIZE]
+            if resultado:
 
-                print("🧠 transcribiendo...")
+                print(
+                    "📝 texto:",
+                    resultado["texto"]
+                )
 
-                texto = transcribir_audio(window_audio)
+                print(
+                    "🤖 respuesta:",
+                    resultado["respuesta"]
+                )
 
-                print("📝 texto:", texto)
+                # ==============================
+                # GUARDAR MEMORIA
+                # ==============================
 
-                # ❌ FIX: si no hay texto, reset parcial
-                if not texto:
-                    audio_buffer = audio_buffer[WINDOW_SIZE - OVERLAP_SIZE:]
-                    continue
+                conversation_history.append({
 
-                await ws.send_json({
-                    "type": "final",
-                    "texto": texto
+                    "role": "user",
+
+                    "content": resultado["texto"]
+
                 })
 
-                try:
+                conversation_history.append({
 
-                    print("🤖 preguntando IA...")
+                    "role": "assistant",
 
-                    respuesta = ask_llm(texto)
+                    "content": resultado["respuesta"]
 
-                    print("✅ respuesta:", respuesta)
+                })
 
-                    await ws.send_json({
-                        "type": "ia",
-                        "texto": respuesta
-                    })
+                # limitar memoria
+                if len(conversation_history) > 20:
 
-                except Exception as e:
+                    conversation_history = (
+                        conversation_history[-20:]
+                    )
 
-                    print("❌ ERROR IA:", e)
+                # ==============================
+                # TEXTO ESCUCHADO
+                # ==============================
 
-                    await ws.send_json({
-                        "type": "error",
-                        "texto": str(e)
-                    })
+                await ws.send_json({
 
-                # 🔥 SLIDING WINDOW (NO RESET BRUSCO)
-                audio_buffer = audio_buffer[WINDOW_SIZE - OVERLAP_SIZE:]
+                    "type": "final",
+
+                    "texto": resultado["texto"]
+                })
+
+                # ==============================
+                # RESPUESTA IA
+                # ==============================
+
+                await ws.send_json({
+
+                    "type": "ia",
+
+                    "texto": resultado["respuesta"]
+                })
 
     except Exception as e:
 
-        print("WS ERROR:", e)
-        await ws.close()
+        print("❌ WS ERROR:", e)
+
+    finally:
+
+        print("🔌 Cliente desconectado")

@@ -80,9 +80,9 @@ const statusDiv = document.getElementById("status")
 const usuarioDiv = document.getElementById("usuario")
 const iaDiv = document.getElementById("ia")
 
-// =========================
-// DETENER
-// =========================
+// =====================================================
+// DETENER TODO
+// =====================================================
 
 function stopEverything(){
 
@@ -121,9 +121,9 @@ function stopEverything(){
 document.getElementById("stop").onclick =
     stopEverything
 
-// =========================
+// =====================================================
 // RESAMPLE
-// =========================
+// =====================================================
 
 function resampleBuffer(
     buffer,
@@ -167,9 +167,9 @@ function resampleBuffer(
     return result
 }
 
-// =========================
+// =====================================================
 // INICIAR
-// =========================
+// =====================================================
 
 document.getElementById("start").onclick =
 async () => {
@@ -181,9 +181,9 @@ async () => {
 
     running = true
 
-    // =====================
+    // =================================================
     // WEBSOCKET
-    // =====================
+    // =================================================
 
     ws = new WebSocket(
         "ws://localhost:8004/ws/realtime"
@@ -193,8 +193,23 @@ async () => {
 
     ws.onopen = () => {
 
+        console.log("✅ WS abierto")
+
         statusDiv.innerText =
             "✅ Conectado"
+    }
+
+    ws.onclose = (e) => {
+
+        console.log("❌ WS cerrado", e)
+
+        statusDiv.innerText =
+            "🔌 Desconectado"
+    }
+
+    ws.onerror = (e) => {
+
+        console.log("🔥 WS error", e)
     }
 
     ws.onmessage = (event) => {
@@ -212,12 +227,12 @@ async () => {
 
             iaDiv.innerText = data.texto
 
-            const speech = new SpeechSynthesisUtterance(
-                data.texto
-            )
+            const speech =
+                new SpeechSynthesisUtterance(
+                    data.texto
+                )
 
             speech.lang = "es-ES"
-
             speech.rate = 1
 
             window.speechSynthesis.speak(speech)
@@ -230,15 +245,9 @@ async () => {
         }
     }
 
-    ws.onclose = () => {
-
-        statusDiv.innerText =
-            "🔌 Desconectado"
-    }
-
-    // =====================
+    // =================================================
     // ESPERAR WS
-    // =====================
+    // =================================================
 
     await new Promise(
         res => ws.addEventListener(
@@ -247,9 +256,9 @@ async () => {
         )
     )
 
-    // =====================
+    // =================================================
     // MICRÓFONO
-    // =====================
+    // =================================================
 
     stream =
         await navigator.mediaDevices
@@ -277,14 +286,24 @@ async () => {
     const inputSampleRate =
         audioContext.sampleRate
 
+    console.log(
+        "🎤 sampleRate:",
+        inputSampleRate
+    )
+
     source =
         audioContext
         .createMediaStreamSource(stream)
 
+    // =================================================
+    // FRAME EXACTO PARA WEBRTCVAD
+    // 480 samples = 30ms @ 16khz
+    // =================================================
+
     processor =
         audioContext
         .createScriptProcessor(
-            1024,
+            512,
             1,
             1
         )
@@ -299,8 +318,18 @@ async () => {
             return
         }
 
+        console.log("🎤 procesando")
+
+        // =============================================
+        // AUDIO INPUT
+        // =============================================
+
         const input =
             e.inputBuffer.getChannelData(0)
+
+        // =============================================
+        // RESAMPLE
+        // =============================================
 
         const resampled =
             resampleBuffer(
@@ -308,6 +337,10 @@ async () => {
                 inputSampleRate,
                 16000
             )
+
+        // =============================================
+        // FLOAT32 -> PCM16
+        // =============================================
 
         const pcm =
             new Int16Array(
@@ -338,13 +371,32 @@ async () => {
             sum += Math.abs(pcm[i])
         }
 
+        // =============================================
+        // VOLUMEN
+        // =============================================
+
         const volume =
             sum / pcm.length
 
-        // filtro silencio
-        if(volume < 20){
+        console.log(
+            "📤 enviando",
+            pcm.length,
+            "samples",
+            "vol=",
+            volume
+        )
+
+        // =============================================
+        // IGNORAR SILENCIO
+        // =============================================
+
+        if(volume < 5){
             return
         }
+
+        // =============================================
+        // ENVIAR
+        // =============================================
 
         ws.send(pcm.buffer)
     }

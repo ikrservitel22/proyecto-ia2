@@ -20,7 +20,7 @@ def transcribir_array(audio_array):
 
         condition_on_previous_text=True,
 
-        temperature=0.0,
+        temperature=0.1,
 
         initial_prompt="Conversación natural en español."
     )
